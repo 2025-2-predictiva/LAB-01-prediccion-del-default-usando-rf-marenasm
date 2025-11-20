@@ -92,3 +92,131 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+import os
+import gzip
+import json
+import pickle
+
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    balanced_accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+)
+from sklearn.model_selection import GridSearchCV
+
+
+def pregunta01():
+    train_data = pd.read_csv("files/input/train_data.csv.zip", compression="zip")
+    test_data = pd.read_csv("files/input/test_data.csv.zip", compression="zip")
+
+    def cleanse(df):
+        df = df.copy()
+        df.rename(columns={"default payment next month": "default"}, inplace=True)
+        df.drop(columns=["ID"], inplace=True)
+        df.dropna(inplace=True)
+        df = df[(df["EDUCATION"] != 0) & (df["MARRIAGE"] != 0)]
+        df["EDUCATION"] = df["EDUCATION"].apply(lambda value: 4 if value > 4 else value)
+        return df
+
+    train_data = cleanse(train_data)
+    test_data = cleanse(test_data)
+
+    x_train = train_data.drop(columns=["default"])
+    y_train = train_data["default"]
+    x_test = test_data.drop(columns=["default"])
+    y_test = test_data["default"]
+
+    categorical_features = ["SEX", "EDUCATION", "MARRIAGE"]
+
+    def make_pipeline(categorical_cols):
+        categorical_transformer = OneHotEncoder(handle_unknown="ignore")
+        preprocessor = ColumnTransformer(
+            transformers=[("cat", categorical_transformer, categorical_cols)],
+            remainder="passthrough",
+        )
+        pipeline = Pipeline(
+            steps=[
+                ("preprocessor", preprocessor),
+                ("classifier", RandomForestClassifier(random_state=42)),
+            ]
+        )
+        return pipeline
+
+    pipeline = make_pipeline(categorical_features)
+
+    def optimize(pipeline, x_train, y_train):
+        param_grid = {
+            "classifier__n_estimators": [200],
+            "classifier__max_depth": [None],
+            "classifier__min_samples_split": [10],
+            "classifier__min_samples_leaf": [1, 2],
+            "classifier__max_features": ["sqrt"],
+        }
+        search = GridSearchCV(
+            estimator=pipeline,
+            param_grid=param_grid,
+            cv=10,
+            scoring="balanced_accuracy",
+            n_jobs=-1,
+            refit=True,
+        )
+        return search
+
+    grid_search = optimize(pipeline, x_train, y_train)
+    grid_search.fit(x_train, y_train)
+
+    model_dir = "files/models"
+    os.makedirs(model_dir, exist_ok=True)
+
+    def save_model(path, estimator):
+        with gzip.open(path, "wb") as handle:
+            pickle.dump(estimator, handle)
+
+    save_model(os.path.join(model_dir, "model.pkl.gz"), grid_search)
+
+    def metrics_calc(y_true, y_pred, dataset):
+        return {
+            "type": "metrics",
+            "dataset": dataset,
+            "precision": precision_score(y_true, y_pred, zero_division=0),
+            "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+            "recall": recall_score(y_true, y_pred, zero_division=0),
+            "f1_score": f1_score(y_true, y_pred, zero_division=0),
+        }
+
+    def matrix_calc(y_true, y_pred, dataset):
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+        return {
+            "type": "cm_matrix",
+            "dataset": dataset,
+            "true_0": {"predicted_0": int(tn), "predicted_1": int(fp)},
+            "true_1": {"predicted_0": int(fn), "predicted_1": int(tp)},
+        }
+
+    pred_train = grid_search.predict(x_train)
+    pred_test = grid_search.predict(x_test)
+
+    metrics = [
+        metrics_calc(y_train, pred_train, "train"),
+        metrics_calc(y_test, pred_test, "test"),
+        matrix_calc(y_train, pred_train, "train"),
+        matrix_calc(y_test, pred_test, "test"),
+    ]
+
+    output_dir = "files/output"
+    os.makedirs(output_dir, exist_ok=True)
+    metrics_path = os.path.join(output_dir, "metrics.json")
+    with open(metrics_path, "w", encoding="utf-8") as handle:
+        for record in metrics:
+            handle.write(json.dumps(record) + "\n")
+
+
+if __name__ == "__main__":
+    pregunta01()
